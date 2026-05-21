@@ -3,11 +3,11 @@ import os
 
 # 1. Configuração de Ambiente e Leitura (Sprint 1)
 def carregar_dados():
-    # Caminhos dos arquivos de entrada
+    # Caminhos apontando para a pasta correta
     files = {
-        'professores': 'professores.csv',
-        'turmas': 'turmas.csv',
-        'salas': 'salas.csv'
+        'professores': 'csv/professores.csv',
+        'turmas': 'csv/turmas.csv',
+        'salas': 'csv/salas.csv'
     }
     
     data = {}
@@ -22,3 +22,26 @@ def carregar_dados():
         else:
             print(f"Erro: Arquivo {path} não encontrado.")
     return data
+
+def validar_capacidade(turma, sala):
+    """
+    Regra: A sala deve comportar a quantidade de alunos da turma[cite: 30].
+    """
+    return turma['alunos'] <= sala['capacidade']
+
+def validar_tipo_sala(turma, sala):
+    """
+    Regra Atualizada: Correspondência exata.
+    Disciplinas de laboratório SÓ em laboratórios.
+    Disciplinas teóricas SÓ em salas teóricas.
+    """
+    # Retorna True se forem iguais, ou False se forem diferentes
+    return turma['tipo'].lower() == sala['tipo'].lower()
+
+def validar_habilitacao(professor, turma):
+    """
+    Regra: O professor só pode lecionar disciplinas que está habilitado[cite: 28].
+    """
+    return professor['disciplina'] == turma['disciplina']
+
+    return valido
