@@ -44,4 +44,22 @@ def validar_habilitacao(professor, turma):
     """
     return professor['disciplina'] == turma['disciplina']
 
+def validar_disponibilidade(professor, dia, horario):
+    """
+    Regra: Professor só pode ser alocado em seus horários disponíveis[cite: 28].
+    """
+    # Assume-se que o CSV de professores tem colunas 'dia' e 'horario' de disponibilidade
+    return (professor['dia'] == dia) and (professor['horario'] == horario)
+
+# Função principal de validação que une todas as regras
+def verificar_todas_regras(professor, turma, sala, dia, horario):
+    """
+    Executa o checklist completo de regras de negócio para uma alocação.
+    """
+    valido = (
+        validar_habilitacao(professor, turma) and
+        validar_capacidade(turma, sala) and
+        validar_tipo_sala(turma, sala) and
+        validar_disponibilidade(professor, dia, horario) # REGRA ADICIONADA
+    )
     return valido
