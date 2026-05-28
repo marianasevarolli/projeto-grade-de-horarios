@@ -464,33 +464,47 @@ def gerar_grade(data: dict) -> pd.DataFrame:
     return grade
 
 
-def exportar_grade(grade: pd.DataFrame, caminho: str = 'csv/grade_final.csv') -> None:
+def exportar_grade(
+    grade: pd.DataFrame,
+    caminho: str = 'csv/grade_final.csv',
+) -> str | None:
     """
-    RF_8, RF_11 — Exporta a grade gerada para um arquivo CSV.
- 
-    Turmas que compartilham a mesma aula (mesmo professor + sala + dia + horário)
-    são agrupadas em UMA única linha, com os identificadores separados por ';'.
-    Exemplo: 'SI1;CC1' indica que SI1 e CC1 compartilham a mesma aula.
- 
-    Cria automaticamente todos os diretórios do caminho caso não existam,
-    garantindo compatibilidade com Windows, Linux e macOS (RNF_2).
- 
-    Salva no caminho informado (padrão: 'csv/grade_final.csv').
+    RF_8, RF_11 — Exporta a grade gerada para um arquivo CSV físico.
+
+    Comportamento:
+      • Agrupa turmas compartilhadas no formato 'SI1;CC1' (RF_11).
+      • Salva com encoding UTF-8 e sem a coluna de índice do DataFrame.
+      • Cria automaticamente o diretório de destino se ele não existir,
+        garantindo portabilidade entre Windows, Linux e macOS (RNF_2).
+      • Retorna o caminho absoluto do arquivo salvo, ou None se a grade
+        estiver vazia (para uso na interface visual e nos testes).
+
+    Colunas obrigatórias na saída (Tabela de Saída do projeto):
+        turma | disciplina | professor | sala | dia | horario
+
+    Parâmetros:
+        grade   → DataFrame interno gerado por gerar_grade()
+        caminho → caminho relativo ou absoluto do arquivo de destino
+                  (padrão: 'csv/grade_final.csv')
+
+    Retorna:
+        str  → caminho absoluto do arquivo salvo em caso de sucesso
+        None → grade vazia, nenhum arquivo gerado
     """
     if grade.empty:
         print("⚠️  Grade vazia. Nenhum arquivo gerado.")
-        return
- 
-    # Cria o diretório de destino se não existir (portável entre SOs).
-    # os.path.dirname retorna '' para caminhos sem pasta (ex: 'grade.csv'),
-    # então só chama makedirs quando há um diretório explícito no caminho.
+        return None
+
+    # Cria o diretório de destino se não existir.
+    # os.path.dirname retorna '' para caminhos sem barra (ex: 'grade.csv'),
+    # portanto makedirs só é chamado quando existe uma pasta explícita.
     diretorio = os.path.dirname(caminho)
     if diretorio:
         os.makedirs(diretorio, exist_ok=True)
 
-    # RF_11: agrupa turmas que compartilham o mesmo slot na saída.
-    # A chave de agrupamento é: disciplina + professor + sala + dia + horario.
-    # Turmas do grupo são concatenadas com ';' na coluna 'turma'.
+    # Agrupamento de turmas compartilhadas para a saída (RF_11).
+    # Chave: disciplina + professor + sala + dia + horario.
+    # Turmas do mesmo slot são unidas com ';' na coluna 'turma'.
     grade_exportacao = (
         grade
         .groupby(['disciplina', 'professor', 'sala', 'dia', 'horario'], sort=False)
@@ -498,5 +512,10 @@ def exportar_grade(grade: pd.DataFrame, caminho: str = 'csv/grade_final.csv') ->
         .reset_index()
     )[['turma', 'disciplina', 'professor', 'sala', 'dia', 'horario']]
 
-    grade_exportacao.to_csv(caminho, index=False)
-    print(f"✅ Grade exportada com sucesso em '{caminho}'.")
+    # Salva sem índice e com encoding UTF-8 explícito para suportar
+    # acentos e caracteres especiais nos nomes de professores/disciplinas.
+    grade_exportacao.to_csv(caminho, index=False, encoding='utf-8')
+
+    caminho_absoluto = os.path.abspath(caminho)
+    print(f"✅ Grade exportada com sucesso em '{caminho_absoluto}'.")
+    return caminho_absoluto
