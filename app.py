@@ -11,12 +11,13 @@ Execução:
 """
 
 import io
+import os
 import contextlib
 
 import pandas as pd
 import streamlit as st
 
-from projeto import gerar_grade
+from projeto import gerar_grade, exportar_grade
 
 # =============================================================================
 # CONSTANTES
@@ -368,6 +369,39 @@ st.markdown("""
 
 
 # =============================================================================
+# SIDEBAR — CONFIGURAÇÕES DE EXPORTAÇÃO (RF_8)
+#
+# Permite ao usuário escolher o diretório onde o arquivo físico
+# 'grade_final.csv' será salvo automaticamente ao gerar a grade.
+# O nome do arquivo é fixo conforme especificação do projeto.
+# =============================================================================
+
+with st.sidebar:
+    st.header("⚙️ Exportação")
+
+    # Diretório de destino: campo de texto editável com valor padrão 'csv'.
+    # Ao alterar, o próximo clique em "Gerar Grade" usará o novo caminho.
+    dir_exportacao = st.text_input(
+        "Diretório de salvamento",
+        value="csv",
+        help=(
+            "Pasta onde o grade_final.csv será salvo automaticamente. "
+            "Use caminhos relativos (ex: csv) ou absolutos "
+            "(ex: C:\\Users\\Mari\\Downloads)."
+        ),
+    )
+
+    # Exibe o caminho completo do arquivo que será gerado
+    caminho_exportacao = os.path.join(dir_exportacao, "grade_final.csv")
+    st.caption(f"Arquivo: `{caminho_exportacao}`")
+    st.divider()
+    st.caption(
+        "💡 O arquivo é salvo automaticamente ao clicar em "
+        "**Gerar Grade de Horários**."
+    )
+
+
+# =============================================================================
 # CABEÇALHO
 # =============================================================================
 
@@ -489,8 +523,15 @@ btn_gerar = st.button(
 if btn_gerar and todos_validos:
     with st.spinner("Processando alocações..."):
         grade, avisos = capturar_avisos_grade(dados_validos)
-    st.session_state['grade']  = grade
-    st.session_state['avisos'] = avisos
+
+    # ── Salvamento automático do arquivo físico (RF_8) ────────────────────
+    # Chama exportar_grade() de projeto.py, que cria o diretório se necessário,
+    # salva com UTF-8 sem índice e retorna o caminho absoluto para exibição.
+    caminho_salvo = exportar_grade(grade, caminho_exportacao)
+
+    st.session_state['grade']         = grade
+    st.session_state['avisos']        = avisos
+    st.session_state['caminho_salvo'] = caminho_salvo
 
 
 # =============================================================================
@@ -653,15 +694,54 @@ if 'grade' in st.session_state:
                     )
                     st.markdown(html_turma, unsafe_allow_html=True)
 
-        # ── Download do CSV final ─────────────────────────────────────────
+        # ── Área de exportação ────────────────────────────────────────────
         st.divider()
-        st.download_button(
-            label="⬇️ Baixar grade_final.csv",
-            data=converter_grade_para_bytes(grade),
-            file_name="grade_final.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
+
+        # Confirmação do salvamento automático já realizado ao gerar a grade.
+        # O caminho_salvo é None apenas se a grade estiver vazia.
+        caminho_salvo = st.session_state.get('caminho_salvo')
+        if caminho_salvo:
+            st.success(
+                f"✅ **grade_final.csv** salvo automaticamente em:\n\n"
+                f"`{caminho_salvo}`"
+            )
+
+        # Dois botões lado a lado:
+        #   Esquerda → re-exporta para o caminho configurado no sidebar
+        #              (útil se o usuário mudou o diretório após gerar)
+        #   Direita  → baixa o arquivo direto no navegador (download local)
+        col_salvar, col_baixar = st.columns(2)
+
+        with col_salvar:
+            if st.button(
+                "📁 Salvar grade_final.csv",
+                help=(
+                    f"Salva o arquivo em '{caminho_exportacao}'. "
+                    "Útil se você alterou o diretório no painel lateral."
+                ),
+                use_container_width=True,
+            ):
+                # Re-executa a exportação com o caminho atual do sidebar.
+                # Isso permite ao usuário trocar o diretório e salvar novamente
+                # sem precisar regenerar toda a grade.
+                novo_caminho = exportar_grade(grade, caminho_exportacao)
+                if novo_caminho:
+                    st.session_state['caminho_salvo'] = novo_caminho
+                    st.success(f"✅ Salvo em `{novo_caminho}`")
+                else:
+                    st.warning("Nenhum arquivo salvo: a grade está vazia.")
+
+        with col_baixar:
+            # Download via navegador: gera os bytes em memória (sem disco)
+            # e entrega ao Streamlit para o browser baixar diretamente.
+            st.download_button(
+                label="⬇️ Baixar no navegador",
+                data=converter_grade_para_bytes(grade),
+                file_name="grade_final.csv",
+                mime="text/csv",
+                help="Baixa o grade_final.csv diretamente pelo navegador.",
+                use_container_width=True,
+            )
 
 
 # =============================================================================
