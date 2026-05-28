@@ -175,19 +175,9 @@ def alocar_aula(
 
 
 # =============================================================================
-# MÓDULO 4 — ALOCAÇÃO II / CONTROLE DE CONFLITOS AVANÇADO  (Sprint S7 — ALOC_02)
+# MÓDULO 4 — ALOCAÇÃO II / CONTROLE DE CONFLITOS  (Sprint S7 — ALOC_02)
 #
-# Amplia o motor com duas novas travas e refatora o laço principal para que
-# todas as restrições sejam verificadas de forma combinatória e exaustiva.
-#
-# Novas travas adicionadas nesta sprint:
-#   sala_ja_ocupada()             → RN_5 (conflito de sala)
-#   turma_ja_alocada_no_horario() → RN_4 (conflito de turma)
-#
-# O laço gerar_grade() foi expandido para:
-#   1. Varrer TODOS os slots disponíveis de um professor (não apenas o primeiro)
-#   2. Checar as três travas antes de qualquer alocação
-#   3. Maximizar o número de turmas alocadas (RN_8)
+# Travas de conflito de sala (RN_5) e de turma (RN_4).
 # =============================================================================
 
 def sala_ja_ocupada(
@@ -199,14 +189,7 @@ def sala_ja_ocupada(
     """
     ALOC_02 — Trava de conflito de sala física (RN_5).
 
-    Verifica se a sala já está sendo usada por outra aula no mesmo
-    dia e horário solicitados.
-
-    Mecânica da trava:
-        1. Filtra a grade pelas linhas onde 'sala' == id_sala
-        2. Dentro desse filtro, procura 'dia' == dia  E  'horario' == horario
-        3. Resultado não vazio → sala ocupada → retorna True
-        4. Resultado vazio     → sala livre   → retorna False
+    Verifica se a sala já está sendo usada por outra aula no mesmo slot.
 
     Retorna True  → sala OCUPADA  (alocação deve ser BLOQUEADA)
     Retorna False → sala LIVRE    (alocação pode prosseguir)
@@ -231,14 +214,8 @@ def turma_ja_alocada_no_horario(
     """
     ALOC_02 — Trava de conflito de agenda da turma (RN_4).
 
-    Verifica se a turma já possui uma aula alocada no mesmo dia e horário.
-    Garante que nenhuma turma esteja em dois lugares ao mesmo tempo.
-
-    Mecânica da trava:
-        1. Filtra a grade pelas linhas onde 'turma' == id_turma
-        2. Verifica se existe 'dia' == dia  E  'horario' == horario
-        3. Resultado não vazio → turma ocupada → retorna True
-        4. Resultado vazio     → turma livre   → retorna False
+    Verifica se a turma já possui uma aula alocada no mesmo slot.
+    Impede que uma turma esteja em dois lugares ao mesmo tempo.
 
     Retorna True  → turma OCUPADA  (alocação deve ser BLOQUEADA)
     Retorna False → turma LIVRE    (alocação pode prosseguir)
@@ -254,35 +231,194 @@ def turma_ja_alocada_no_horario(
     return not conflito.empty
 
 
+# =============================================================================
+# MÓDULO 5 — ALOCAÇÃO III / TURMAS COMPARTILHADAS E DESEMPATE (ALOC_03)
+#
+# Implementa os requisitos que faltavam na auditoria:
+#
+#   RF_11 / RN_9  → Aulas compartilhadas: múltiplas turmas na mesma aula
+#   RN_10         → Capacidade somada quando turmas compartilham a aula
+#   RN_12         → Desempate por menor carga horária do professor
+#   RN_13         → Teórica e Laboratório tratados como grupos independentes
+#
+# Lógica de agrupamento (analogia):
+#   Pense como um "pool de caronas": turmas com o mesmo destino
+#   (disciplina + tipo) são agrupadas. O sistema tenta colocar todas
+#   no mesmo "carro" (sala + professor + horário). Se não couberem
+#   juntas, cada uma vai em seu próprio carro (fallback individual).
+# =============================================================================
+
+def contar_aulas_professor(grade: pd.DataFrame, nome_professor: str) -> int:
+    """
+    ALOC_03 — Conta o total de aulas já alocadas para o professor na grade.
+
+    Usado pelo critério de desempate (RN_12): quando dois professores são
+    igualmente válidos, o com menor contagem é escolhido primeiro.
+
+    Retorna 0 se a grade estiver vazia ou o professor não tiver aulas.
+    """
+    if grade.empty:
+        return 0
+    return len(grade[grade['professor'] == nome_professor])
+
+
+def agrupar_turmas_por_disciplina(turmas: pd.DataFrame) -> list:
+    """
+    ALOC_03 — Agrupa turmas com a mesma disciplina E o mesmo tipo (RN_9, RN_13).
+
+    RN_9:  turmas com a mesma disciplina PODEM compartilhar a mesma aula.
+    RN_13: componentes teórico e laboratorial da mesma disciplina são
+           GRUPOS SEPARADOS — nunca são agrupados entre si.
+
+    Exemplo:
+        'Banco de Dados - Teorica' (SI1, CC1) → Grupo 1 (podem compartilhar)
+        'Banco de Dados - Lab'     (SI1)      → Grupo 2 (alocação independente)
+
+    Retorna uma lista de DataFrames, um por grupo único de disciplina+tipo.
+    """
+    grupos = []
+    for _, grupo in turmas.groupby(['disciplina', 'tipo'], sort=False):
+        grupos.append(grupo.reset_index(drop=True))
+    return grupos
+
+
+def calcular_total_alunos(grupo: pd.DataFrame) -> int:
+    """
+    ALOC_03 — Calcula a soma total de alunos de todas as turmas do grupo (RN_10).
+
+    Usada para validar se uma sala comporta um grupo de turmas compartilhadas.
+    """
+    return int(grupo['alunos'].sum())
+
+
+def validar_capacidade_grupo(grupo: pd.DataFrame, sala: pd.Series) -> bool:
+    """
+    ALOC_03 — Valida se a sala comporta a SOMA de alunos do grupo (RN_10).
+
+    Substitui validar_capacidade() quando há aula compartilhada:
+    a sala precisa acomodar o total combinado, não apenas uma turma.
+
+    Retorna True se capacidade da sala >= total de alunos do grupo.
+    """
+    return calcular_total_alunos(grupo) <= sala['capacidade']
+
+
+def _tentar_alocar_grupo(
+    grade: pd.DataFrame,
+    grupo: pd.DataFrame,
+    professores: pd.DataFrame,
+    salas: pd.DataFrame
+) -> tuple:
+    """
+    ALOC_03 — Núcleo do motor: tenta alocar um grupo de turmas em um único slot.
+
+    Fluxo:
+      1. Ordena professores por carga horária crescente (RN_12 — desempate).
+      2. Para cada professor (do menos ocupado ao mais ocupado):
+           a. Verifica habilitação (RN_1) e disponibilidade (RN_2).
+           b. [TRAVA 1] Professor já alocado neste slot? (RN_3)
+           c. [TRAVA 3] Alguma turma do grupo já tem aula neste slot? (RN_4)
+           d. Para cada sala:
+                i.  Tipo compatível? (RN_7)
+                ii. Capacidade suficiente para o grupo inteiro? (RN_10)
+                iii.[TRAVA 2] Sala já ocupada neste slot? (RN_5)
+                iv. ✅ Aloca todas as turmas do grupo no mesmo slot.
+
+    Funciona para grupos de 1 turma (individual) ou N turmas (compartilhado).
+
+    Retorna: (grade_atualizada, True) em caso de sucesso.
+             (grade_original,   False) se nenhuma combinação válida foi encontrada.
+    """
+    # RN_12: ordena professores pela carga atual (crescente) para desempate.
+    # 'stable' preserva a ordem original em caso de carga igual.
+    carga_por_nome = professores['nome'].map(
+        lambda nome: contar_aulas_professor(grade, nome)
+    )
+    professores_ordenados = (
+        professores
+        .assign(_carga=carga_por_nome)
+        .sort_values('_carga', kind='stable')
+        .drop(columns='_carga')
+        .reset_index(drop=True)
+    )
+
+    # Turma de referência: disciplina e tipo são iguais em todo o grupo
+    turma_ref = grupo.iloc[0]
+
+    for _, professor in professores_ordenados.iterrows():
+
+        # RN_1: professor habilitado para a disciplina do grupo?
+        if not validar_habilitacao(professor, turma_ref):
+            continue
+
+        dia     = professor['dia']
+        horario = professor['horario']
+
+        # RN_2: slot pertence à disponibilidade declarada do professor?
+        if not validar_disponibilidade(professor, dia, horario):
+            continue
+
+        # TRAVA 1 — RN_3: professor já está comprometido neste slot?
+        if professor_ja_alocado(grade, professor['nome'], dia, horario):
+            continue
+
+        # TRAVA 3 — RN_4: ALGUMA turma do grupo já tem aula neste slot?
+        # Bloqueia se qualquer turma do grupo já estiver ocupada.
+        conflito_turma = any(
+            turma_ja_alocada_no_horario(grade, row['turma'], dia, horario)
+            for _, row in grupo.iterrows()
+        )
+        if conflito_turma:
+            continue
+
+        for _, sala in salas.iterrows():
+
+            # RN_7: tipo da sala compatível com o tipo da disciplina?
+            if not validar_tipo_sala(turma_ref, sala):
+                continue
+
+            # RN_10: sala comporta a SOMA de alunos de todas as turmas do grupo?
+            if not validar_capacidade_grupo(grupo, sala):
+                continue
+
+            # TRAVA 2 — RN_5: sala já está em uso neste slot?
+            if sala_ja_ocupada(grade, sala['sala'], dia, horario):
+                continue
+
+            # ✅ Todas as regras e travas passaram.
+            # Aloca cada turma do grupo no mesmo professor/sala/slot.
+            for _, turma_row in grupo.iterrows():
+                grade = alocar_aula(
+                    grade,
+                    turma_row['turma'],
+                    turma_row['disciplina'],
+                    professor['nome'],
+                    sala['sala'],
+                    dia,
+                    horario
+                )
+
+            return grade, True  # Sucesso: interrompe busca para este grupo
+
+    return grade, False  # Nenhuma combinação válida encontrada
+
+
 def gerar_grade(data: dict) -> pd.DataFrame:
     """
-    ALOC_02 — Motor principal de geração da grade (Algoritmo Greedy Expandido).
+    ALOC_03 — Motor principal completo (Greedy Expandido com turmas compartilhadas).
 
-    Evolução em relação ao ALOC_01:
-      - Itera sobre TODOS os slots disponíveis de cada professor, não só o
-        primeiro encontrado, maximizando alocações (RN_8, RN_11).
-      - Inclui as três travas de conflito antes de confirmar qualquer alocação:
-            [TRAVA 1] professor_ja_alocado()       → RN_3
-            [TRAVA 2] sala_ja_ocupada()             → RN_5  (ALOC_02)
-            [TRAVA 3] turma_ja_alocada_no_horario() → RN_4  (ALOC_02)
+    Evolução em relação ao ALOC_02:
+      - Agrupa turmas por disciplina+tipo antes de iterar (RN_9, RN_13).
+      - Tenta alocar grupos como aula compartilhada primeiro (RF_11, RN_10).
+      - Fallback individual: se o grupo não couber junto, cada turma é
+        tentada separadamente para maximizar alocações (RN_8).
+      - Professores ordenados por carga horária no desempate (RN_12).
+      - Todas as travas de ALOC_01 e ALOC_02 continuam ativas.
 
-    Critério de interrupção do laço:
-        O laço interno (professor × sala) para assim que encontra a PRIMEIRA
-        combinação válida para a turma corrente (comportamento Greedy).
-        O laço externo (turmas) continua até que TODAS as turmas sejam tentadas.
-
-    Fluxo completo por turma:
-        Para cada turma:
-          └─ Para cada linha do professor (múltiplos slots possíveis — RF_9):
-               ├─ [RN_1]  Habilitado para a disciplina?
-               ├─ [RN_2]  Disponível neste dia/horário?
-               ├─ [TRAVA 1 — RN_3] Professor já alocado neste slot?
-               ├─ [TRAVA 3 — RN_4] Turma já tem aula neste slot?   (ALOC_02)
-               └─ Para cada sala:
-                    ├─ [RN_6]  Sala comporta os alunos?
-                    ├─ [RN_7]  Tipo de sala compatível?
-                    ├─ [TRAVA 2 — RN_5] Sala já está ocupada?       (ALOC_02)
-                    └─ Todas as travas passaram → aloca
+    Fluxo por grupo de turmas (mesma disciplina + tipo):
+        1. Tentativa compartilhada: todas as turmas do grupo juntas.
+        2. Se falhar E grupo > 1: fallback individual turma a turma.
+        3. Se falhar individual: reporta turma não alocada (RN_8 — melhor esforço).
 
     Retorna o DataFrame da grade preenchida.
     """
@@ -292,72 +428,35 @@ def gerar_grade(data: dict) -> pd.DataFrame:
     turmas      = data['turmas']
     salas       = data['salas']
 
-    for _, turma in turmas.iterrows():
-        alocado = False
+    # RN_9 + RN_13: forma grupos de turmas com mesma disciplina e mesmo tipo.
+    # Disciplinas com componentes teórico e laboratorial ficam em grupos distintos.
+    grupos = agrupar_turmas_por_disciplina(turmas)
 
-        # ── Laço de varredura combinatória ────────────────────────────────
-        # Itera sobre TODAS as linhas de professores (cada linha = um slot
-        # de disponibilidade). Um mesmo professor pode aparecer várias vezes
-        # no CSV com disciplinas e horários diferentes (RF_9).
-        for _, professor in professores.iterrows():
-            if alocado:
-                break  # Critério de interrupção: turma já foi alocada
+    for grupo in grupos:
+        # ── Tentativa 1: alocação compartilhada (todo o grupo junto) ──────
+        grade, alocado = _tentar_alocar_grupo(grade, grupo, professores, salas)
 
-            # RN_1: professor está habilitado para esta disciplina?
-            if not validar_habilitacao(professor, turma):
-                continue
+        if alocado:
+            continue  # Grupo alocado com sucesso → próximo grupo
 
-            dia     = professor['dia']
-            horario = professor['horario']
-
-            # RN_2: este slot (dia + horário) pertence à disponibilidade real?
-            if not validar_disponibilidade(professor, dia, horario):
-                continue
-
-            # ── TRAVA 1 — Conflito de agenda do professor (RN_3 / ALOC_01) ─
-            if professor_ja_alocado(grade, professor['nome'], dia, horario):
-                continue
-            # ─────────────────────────────────────────────────────────────
-
-            # ── TRAVA 3 — Conflito de agenda da turma (RN_4 / ALOC_02) ────
-            # Impede que a turma tenha duas disciplinas no mesmo slot.
-            if turma_ja_alocada_no_horario(grade, turma['turma'], dia, horario):
-                continue
-            # ─────────────────────────────────────────────────────────────
-
-            # ── Laço de busca de sala compatível ─────────────────────────
-            for _, sala in salas.iterrows():
-
-                # RN_6: a sala comporta a quantidade de alunos?
-                if not validar_capacidade(turma, sala):
-                    continue
-
-                # RN_7: o tipo da sala é compatível com o tipo da disciplina?
-                if not validar_tipo_sala(turma, sala):
-                    continue
-
-                # ── TRAVA 2 — Conflito de sala física (RN_5 / ALOC_02) ───
-                # Impede que duas turmas ocupem a mesma sala ao mesmo tempo.
-                if sala_ja_ocupada(grade, sala['sala'], dia, horario):
-                    continue
-                # ─────────────────────────────────────────────────────────
-
-                # Todas as regras e travas passaram → registra na grade
-                grade = alocar_aula(
-                    grade,
-                    turma['turma'],
-                    turma['disciplina'],
-                    professor['nome'],
-                    sala['sala'],
-                    dia,
-                    horario
+        # ── Tentativa 2: fallback individual (apenas para grupos > 1) ─────
+        # Se as turmas não couberam juntas (capacidade ou conflito),
+        # tenta alocar cada uma individualmente.
+        if len(grupo) > 1:
+            for _, turma_row in grupo.iterrows():
+                turma_individual = pd.DataFrame([turma_row])
+                grade, alocado_individual = _tentar_alocar_grupo(
+                    grade, turma_individual, professores, salas
                 )
-                alocado = True
-                break  # Sala encontrada: interrompe laço de salas
-
-        if not alocado:
+                if not alocado_individual:
+                    print(
+                        f"⚠️  Turma '{turma_row['turma']}' ({turma_row['disciplina']}) "
+                        f"não pôde ser alocada — sem combinação válida."
+                    )
+        else:
+            turma_row = grupo.iloc[0]
             print(
-                f"⚠️  Turma '{turma['turma']}' ({turma['disciplina']}) "
+                f"⚠️  Turma '{turma_row['turma']}' ({turma_row['disciplina']}) "
                 f"não pôde ser alocada — sem combinação válida de "
                 f"professor, sala e horário disponíveis."
             )
@@ -367,8 +466,27 @@ def gerar_grade(data: dict) -> pd.DataFrame:
 
 def exportar_grade(grade: pd.DataFrame, caminho: str = 'csv/grade_final.csv') -> None:
     """
-    RF_8 — Exporta a grade gerada para um arquivo CSV.
+    RF_8, RF_11 — Exporta a grade gerada para um arquivo CSV.
+
+    Turmas que compartilham a mesma aula (mesmo professor + sala + dia + horário)
+    são agrupadas em UMA única linha, com os identificadores separados por ';'.
+    Exemplo: 'SI1;CC1' indica que SI1 e CC1 compartilham a mesma aula.
+
     Salva no caminho informado (padrão: 'csv/grade_final.csv').
     """
-    grade.to_csv(caminho, index=False)
+    if grade.empty:
+        print("⚠️  Grade vazia. Nenhum arquivo gerado.")
+        return
+
+    # RF_11: agrupa turmas que compartilham o mesmo slot na saída.
+    # A chave de agrupamento é: disciplina + professor + sala + dia + horario.
+    # Turmas do grupo são concatenadas com ';' na coluna 'turma'.
+    grade_exportacao = (
+        grade
+        .groupby(['disciplina', 'professor', 'sala', 'dia', 'horario'], sort=False)
+        .agg(turma=('turma', lambda ids: ';'.join(ids)))
+        .reset_index()
+    )[['turma', 'disciplina', 'professor', 'sala', 'dia', 'horario']]
+
+    grade_exportacao.to_csv(caminho, index=False)
     print(f"✅ Grade exportada com sucesso em '{caminho}'.")
