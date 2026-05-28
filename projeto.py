@@ -22,7 +22,6 @@ def carregar_dados() -> dict:
     for chave, caminho in arquivos.items():
         if os.path.exists(caminho):
             data[chave] = pd.read_csv(caminho)
-            # Conversão de tipos numéricos para evitar comparações incorretas
             if chave == 'salas':
                 data[chave]['capacidade'] = pd.to_numeric(
                     data[chave]['capacidade'], errors='coerce'
@@ -89,31 +88,27 @@ def verificar_todas_regras(
     Retorna True somente se TODAS as quatro regras forem satisfeitas.
     """
     return (
-        validar_habilitacao(professor, turma)      and  # RN_1
-        validar_capacidade(turma, sala)            and  # RN_6
-        validar_tipo_sala(turma, sala)             and  # RN_7
-        validar_disponibilidade(professor, dia, horario)  # RN_2
+        validar_habilitacao(professor, turma)           and  # RN_1
+        validar_capacidade(turma, sala)                 and  # RN_6
+        validar_tipo_sala(turma, sala)                  and  # RN_7
+        validar_disponibilidade(professor, dia, horario)     # RN_2
     )
 
 
 # =============================================================================
-# MÓDULO 3 — ALOCAÇÃO I / MOTOR DE GRADE  (Sprint S6 — ALOC_01)
+# MÓDULO 3 — ALOCAÇÃO I / ESTRUTURA DA GRADE  (Sprint S6 — ALOC_01)
 #
-# Este módulo introduz a estrutura da grade horária global e a trava lógica
-# que impede um professor de ser alocado em dois lugares ao mesmo tempo.
-#
-# Analogia: pense na grade como uma "agenda coletiva da instituição".
-# Antes de marcar qualquer aula, o sistema consulta a agenda para ver se
-# o professor já está ocupado naquele slot de dia+horário.
+# Introduz a grade horária global e a trava de conflito de docente.
+# Analogia: a grade é a "agenda coletiva da instituição". Antes de marcar
+# qualquer aula, o sistema consulta essa agenda para checar disponibilidade.
 # =============================================================================
 
 def criar_grade_vazia() -> pd.DataFrame:
     """
     ALOC_01 — Cria a estrutura base da grade horária unificada.
 
-    A grade é um DataFrame vazio com as colunas definidas na documentação
-    (Tabela de Saída). Cada linha futura representará uma aula alocada,
-    com professor, turma, sala, dia e horário confirmados.
+    Retorna um DataFrame vazio com as colunas do arquivo de saída (grade_final.csv).
+    Cada linha futura representa uma aula confirmada.
 
     Colunas:
         turma       → identificador da turma (ex: 'SI1')
@@ -134,23 +129,16 @@ def professor_ja_alocado(
     horario: str
 ) -> bool:
     """
-    ALOC_01 — TRAVA DE CONFLITO DE AGENDA DO PROFESSOR (RN_3).
+    ALOC_01 — Trava de conflito de agenda do professor (RN_3).
 
     Verifica se o professor já possui uma aula registrada na grade
     para o mesmo dia e horário solicitados.
-
-    Mecânica da trava:
-        1. Filtra a grade pelas linhas onde 'professor' == nome_professor
-        2. Dentro desse filtro, verifica se existe alguma linha com
-           'dia' == dia  E  'horario' == horario
-        3. Se o resultado NÃO estiver vazio → conflito detectado → retorna True
-        4. Se o resultado estiver vazio     → professor livre    → retorna False
 
     Retorna True  → professor OCUPADO  (alocação deve ser BLOQUEADA)
     Retorna False → professor LIVRE    (alocação pode prosseguir)
     """
     if grade.empty:
-        return False  # Grade vazia: nenhum conflito possível
+        return False
 
     conflito = grade[
         (grade['professor'] == nome_professor) &
@@ -172,39 +160,129 @@ def alocar_aula(
     """
     ALOC_01 — Registra uma alocação validada na grade horária.
 
-    Recebe a grade atual e retorna uma nova grade com a linha adicionada.
-    Utiliza pd.concat para preservar o índice e evitar o uso do método
-    depreciado DataFrame.append.
+    Utiliza pd.concat para evitar o uso do método depreciado DataFrame.append.
+    Retorna sempre um novo DataFrame com a linha adicionada.
     """
     nova_linha = pd.DataFrame([{
-        'turma':       turma,
-        'disciplina':  disciplina,
-        'professor':   nome_professor,
-        'sala':        sala,
-        'dia':         dia,
-        'horario':     horario
+        'turma':      turma,
+        'disciplina': disciplina,
+        'professor':  nome_professor,
+        'sala':       sala,
+        'dia':        dia,
+        'horario':    horario
     }])
     return pd.concat([grade, nova_linha], ignore_index=True)
 
 
+# =============================================================================
+# MÓDULO 4 — ALOCAÇÃO II / CONTROLE DE CONFLITOS AVANÇADO  (Sprint S7 — ALOC_02)
+#
+# Amplia o motor com duas novas travas e refatora o laço principal para que
+# todas as restrições sejam verificadas de forma combinatória e exaustiva.
+#
+# Novas travas adicionadas nesta sprint:
+#   sala_ja_ocupada()             → RN_5 (conflito de sala)
+#   turma_ja_alocada_no_horario() → RN_4 (conflito de turma)
+#
+# O laço gerar_grade() foi expandido para:
+#   1. Varrer TODOS os slots disponíveis de um professor (não apenas o primeiro)
+#   2. Checar as três travas antes de qualquer alocação
+#   3. Maximizar o número de turmas alocadas (RN_8)
+# =============================================================================
+
+def sala_ja_ocupada(
+    grade: pd.DataFrame,
+    id_sala: str,
+    dia: str,
+    horario: str
+) -> bool:
+    """
+    ALOC_02 — Trava de conflito de sala física (RN_5).
+
+    Verifica se a sala já está sendo usada por outra aula no mesmo
+    dia e horário solicitados.
+
+    Mecânica da trava:
+        1. Filtra a grade pelas linhas onde 'sala' == id_sala
+        2. Dentro desse filtro, procura 'dia' == dia  E  'horario' == horario
+        3. Resultado não vazio → sala ocupada → retorna True
+        4. Resultado vazio     → sala livre   → retorna False
+
+    Retorna True  → sala OCUPADA  (alocação deve ser BLOQUEADA)
+    Retorna False → sala LIVRE    (alocação pode prosseguir)
+    """
+    if grade.empty:
+        return False
+
+    conflito = grade[
+        (grade['sala']    == id_sala) &
+        (grade['dia']     == dia)     &
+        (grade['horario'] == horario)
+    ]
+    return not conflito.empty
+
+
+def turma_ja_alocada_no_horario(
+    grade: pd.DataFrame,
+    id_turma: str,
+    dia: str,
+    horario: str
+) -> bool:
+    """
+    ALOC_02 — Trava de conflito de agenda da turma (RN_4).
+
+    Verifica se a turma já possui uma aula alocada no mesmo dia e horário.
+    Garante que nenhuma turma esteja em dois lugares ao mesmo tempo.
+
+    Mecânica da trava:
+        1. Filtra a grade pelas linhas onde 'turma' == id_turma
+        2. Verifica se existe 'dia' == dia  E  'horario' == horario
+        3. Resultado não vazio → turma ocupada → retorna True
+        4. Resultado vazio     → turma livre   → retorna False
+
+    Retorna True  → turma OCUPADA  (alocação deve ser BLOQUEADA)
+    Retorna False → turma LIVRE    (alocação pode prosseguir)
+    """
+    if grade.empty:
+        return False
+
+    conflito = grade[
+        (grade['turma']   == id_turma) &
+        (grade['dia']     == dia)      &
+        (grade['horario'] == horario)
+    ]
+    return not conflito.empty
+
+
 def gerar_grade(data: dict) -> pd.DataFrame:
     """
-    ALOC_01 — Motor principal de geração da grade (Algoritmo Greedy).
+    ALOC_02 — Motor principal de geração da grade (Algoritmo Greedy Expandido).
 
-    Estratégia Greedy: para cada turma, aceita a PRIMEIRA combinação válida
-    encontrada de (professor → sala → dia/horário), sem tentar otimizar
-    globalmente. É simples, rápido e suficiente para o escopo atual.
+    Evolução em relação ao ALOC_01:
+      - Itera sobre TODOS os slots disponíveis de cada professor, não só o
+        primeiro encontrado, maximizando alocações (RN_8, RN_11).
+      - Inclui as três travas de conflito antes de confirmar qualquer alocação:
+            [TRAVA 1] professor_ja_alocado()       → RN_3
+            [TRAVA 2] sala_ja_ocupada()             → RN_5  (ALOC_02)
+            [TRAVA 3] turma_ja_alocada_no_horario() → RN_4  (ALOC_02)
 
-    Fluxo por turma:
+    Critério de interrupção do laço:
+        O laço interno (professor × sala) para assim que encontra a PRIMEIRA
+        combinação válida para a turma corrente (comportamento Greedy).
+        O laço externo (turmas) continua até que TODAS as turmas sejam tentadas.
+
+    Fluxo completo por turma:
         Para cada turma:
-          └─ Para cada professor:
-               ├─ Verifica habilitação           (RN_1)
-               ├─ Verifica disponibilidade       (RN_2)
-               ├─ [TRAVA] Verifica conflito na grade (RN_3 / ALOC_01)
+          └─ Para cada linha do professor (múltiplos slots possíveis — RF_9):
+               ├─ [RN_1]  Habilitado para a disciplina?
+               ├─ [RN_2]  Disponível neste dia/horário?
+               ├─ [TRAVA 1 — RN_3] Professor já alocado neste slot?
+               ├─ [TRAVA 3 — RN_4] Turma já tem aula neste slot?   (ALOC_02)
                └─ Para cada sala:
-                    ├─ Verifica capacidade       (RN_6)
-                    ├─ Verifica tipo de sala      (RN_7)
-                    └─ ✅ Aloca e passa para próxima turma
+                    ├─ [RN_6]  Sala comporta os alunos?
+                    ├─ [RN_7]  Tipo de sala compatível?
+                    ├─ [TRAVA 2 — RN_5] Sala já está ocupada?       (ALOC_02)
+                    └─ Todas as travas passaram → aloca
 
     Retorna o DataFrame da grade preenchida.
     """
@@ -217,37 +295,54 @@ def gerar_grade(data: dict) -> pd.DataFrame:
     for _, turma in turmas.iterrows():
         alocado = False
 
+        # ── Laço de varredura combinatória ────────────────────────────────
+        # Itera sobre TODAS as linhas de professores (cada linha = um slot
+        # de disponibilidade). Um mesmo professor pode aparecer várias vezes
+        # no CSV com disciplinas e horários diferentes (RF_9).
         for _, professor in professores.iterrows():
             if alocado:
-                break
+                break  # Critério de interrupção: turma já foi alocada
 
-            # RN_1: professor habilitado para esta disciplina?
+            # RN_1: professor está habilitado para esta disciplina?
             if not validar_habilitacao(professor, turma):
                 continue
 
             dia     = professor['dia']
             horario = professor['horario']
 
-            # RN_2: este é o horário disponível do professor?
+            # RN_2: este slot (dia + horário) pertence à disponibilidade real?
             if not validar_disponibilidade(professor, dia, horario):
                 continue
 
-            # ── TRAVA ALOC_01 ─────────────────────────────────────────────
-            # RN_3: professor já está alocado em outro lugar neste slot?
+            # ── TRAVA 1 — Conflito de agenda do professor (RN_3 / ALOC_01) ─
             if professor_ja_alocado(grade, professor['nome'], dia, horario):
-                continue  # bloqueia e tenta o próximo professor
-            # ──────────────────────────────────────────────────────────────
+                continue
+            # ─────────────────────────────────────────────────────────────
 
+            # ── TRAVA 3 — Conflito de agenda da turma (RN_4 / ALOC_02) ────
+            # Impede que a turma tenha duas disciplinas no mesmo slot.
+            if turma_ja_alocada_no_horario(grade, turma['turma'], dia, horario):
+                continue
+            # ─────────────────────────────────────────────────────────────
+
+            # ── Laço de busca de sala compatível ─────────────────────────
             for _, sala in salas.iterrows():
-                # RN_6: sala comporta a turma?
+
+                # RN_6: a sala comporta a quantidade de alunos?
                 if not validar_capacidade(turma, sala):
                     continue
 
-                # RN_7: tipo de sala compatível com a disciplina?
+                # RN_7: o tipo da sala é compatível com o tipo da disciplina?
                 if not validar_tipo_sala(turma, sala):
                     continue
 
-                # Todas as regras passaram → registra na grade
+                # ── TRAVA 2 — Conflito de sala física (RN_5 / ALOC_02) ───
+                # Impede que duas turmas ocupem a mesma sala ao mesmo tempo.
+                if sala_ja_ocupada(grade, sala['sala'], dia, horario):
+                    continue
+                # ─────────────────────────────────────────────────────────
+
+                # Todas as regras e travas passaram → registra na grade
                 grade = alocar_aula(
                     grade,
                     turma['turma'],
@@ -258,12 +353,13 @@ def gerar_grade(data: dict) -> pd.DataFrame:
                     horario
                 )
                 alocado = True
-                break  # sala encontrada, sai do loop de salas
+                break  # Sala encontrada: interrompe laço de salas
 
         if not alocado:
             print(
                 f"⚠️  Turma '{turma['turma']}' ({turma['disciplina']}) "
-                f"não pôde ser alocada — verifique professores, salas e horários disponíveis."
+                f"não pôde ser alocada — sem combinação válida de "
+                f"professor, sala e horário disponíveis."
             )
 
     return grade
