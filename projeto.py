@@ -467,16 +467,26 @@ def gerar_grade(data: dict) -> pd.DataFrame:
 def exportar_grade(grade: pd.DataFrame, caminho: str = 'csv/grade_final.csv') -> None:
     """
     RF_8, RF_11 — Exporta a grade gerada para um arquivo CSV.
-
+ 
     Turmas que compartilham a mesma aula (mesmo professor + sala + dia + horário)
     são agrupadas em UMA única linha, com os identificadores separados por ';'.
     Exemplo: 'SI1;CC1' indica que SI1 e CC1 compartilham a mesma aula.
-
+ 
+    Cria automaticamente todos os diretórios do caminho caso não existam,
+    garantindo compatibilidade com Windows, Linux e macOS (RNF_2).
+ 
     Salva no caminho informado (padrão: 'csv/grade_final.csv').
     """
     if grade.empty:
         print("⚠️  Grade vazia. Nenhum arquivo gerado.")
         return
+ 
+    # Cria o diretório de destino se não existir (portável entre SOs).
+    # os.path.dirname retorna '' para caminhos sem pasta (ex: 'grade.csv'),
+    # então só chama makedirs quando há um diretório explícito no caminho.
+    diretorio = os.path.dirname(caminho)
+    if diretorio:
+        os.makedirs(diretorio, exist_ok=True)
 
     # RF_11: agrupa turmas que compartilham o mesmo slot na saída.
     # A chave de agrupamento é: disciplina + professor + sala + dia + horario.
