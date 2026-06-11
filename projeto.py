@@ -330,75 +330,89 @@ def _tentar_alocar_grupo(
              (grade_original,   False) se nenhuma combinação válida foi encontrada.
     """
     # RN_12: ordena professores pela carga atual (crescente) para desempate.
-    # 'stable' preserva a ordem original em caso de carga igual.
-    carga_por_nome = professores['nome'].map(
-        lambda nome: contar_aulas_professor(grade, nome)
-    )
-    professores_ordenados = (
-        professores
-        .assign(_carga=carga_por_nome)
-        .sort_values('_carga', kind='stable')
-        .drop(columns='_carga')
-        .reset_index(drop=True)
+    # O agrupamento é feito por matrícula — identificador único do professor.
+    # Usar nome causaria colisão entre dois professores com o mesmo nome.
+    # O nome é extraído depois, apenas para gravar na grade (saída legível).
+    matriculas_unicas = professores['matricula'].unique()
+    carga_por_matricula = {
+        mat: contar_aulas_professor(
+            grade,
+            professores.loc[professores['matricula'] == mat, 'nome'].iloc[0]
+        )
+        for mat in matriculas_unicas
+    }
+    matriculas_ordenadas = sorted(
+        matriculas_unicas, key=lambda m: carga_por_matricula[m]
     )
 
-    # Turma de referência: disciplina e tipo são iguais em todo o grupo
+    # Turma de referência: disciplina e tipo são iguais em todo o grupo.
     turma_ref = grupo.iloc[0]
 
-    for _, professor in professores_ordenados.iterrows():
+    for matricula in matriculas_ordenadas:
 
-        # RN_1: professor habilitado para a disciplina do grupo?
-        if not validar_habilitacao(professor, turma_ref):
-            continue
+        # Todas as linhas deste professor no CSV, identificadas pela matrícula.
+        # Cada linha representa uma disciplina habilitada + um slot disponível.
+        linhas_professor = professores[professores['matricula'] == matricula]
 
-        dia     = professor['dia']
-        horario = professor['horario']
+        # Nome é extraído uma única vez — usado apenas na gravação da grade.
+        nome_professor = linhas_professor.iloc[0]['nome']
 
-        # RN_2: slot pertence à disponibilidade declarada do professor?
-        if not validar_disponibilidade(professor, dia, horario):
-            continue
+        # RN_1: o professor possui ao menos uma linha habilitada para a
+        # disciplina do grupo?
+        linhas_habilitadas = linhas_professor[
+            linhas_professor['disciplina'] == turma_ref['disciplina']
+        ]
+        if linhas_habilitadas.empty:
+            continue  # Professor não habilitado para esta disciplina
 
-        # TRAVA 1 — RN_3: professor já está comprometido neste slot?
-        if professor_ja_alocado(grade, professor['nome'], dia, horario):
-            continue
+        # RN_2: itera sobre TODOS os slots de disponibilidade do professor,
+        # independentemente de a qual disciplina cada slot foi associado no CSV.
+        # A disponibilidade pertence ao professor (matrícula), não à disciplina.
+        for _, slot in linhas_professor.iterrows():
 
-        # TRAVA 3 — RN_4: ALGUMA turma do grupo já tem aula neste slot?
-        # Bloqueia se qualquer turma do grupo já estiver ocupada.
-        conflito_turma = any(
-            turma_ja_alocada_no_horario(grade, row['turma'], dia, horario)
-            for _, row in grupo.iterrows()
-        )
-        if conflito_turma:
-            continue
+            dia     = slot['dia']
+            horario = slot['horario']
 
-        for _, sala in salas.iterrows():
-
-            # RN_7: tipo da sala compatível com o tipo da disciplina?
-            if not validar_tipo_sala(turma_ref, sala):
+            # TRAVA 1 — RN_3: professor já está comprometido neste slot?
+            if professor_ja_alocado(grade, nome_professor, dia, horario):
                 continue
 
-            # RN_10: sala comporta a SOMA de alunos de todas as turmas do grupo?
-            if not validar_capacidade_grupo(grupo, sala):
+            # TRAVA 3 — RN_4: ALGUMA turma do grupo já tem aula neste slot?
+            conflito_turma = any(
+                turma_ja_alocada_no_horario(grade, row['turma'], dia, horario)
+                for _, row in grupo.iterrows()
+            )
+            if conflito_turma:
                 continue
 
-            # TRAVA 2 — RN_5: sala já está em uso neste slot?
-            if sala_ja_ocupada(grade, sala['sala'], dia, horario):
-                continue
+            for _, sala in salas.iterrows():
 
-            # ✅ Todas as regras e travas passaram.
-            # Aloca cada turma do grupo no mesmo professor/sala/slot.
-            for _, turma_row in grupo.iterrows():
-                grade = alocar_aula(
-                    grade,
-                    turma_row['turma'],
-                    turma_row['disciplina'],
-                    professor['nome'],
-                    sala['sala'],
-                    dia,
-                    horario
-                )
+                # RN_7: tipo da sala compatível com o tipo da disciplina?
+                if not validar_tipo_sala(turma_ref, sala):
+                    continue
 
-            return grade, True  # Sucesso: interrompe busca para este grupo
+                # RN_10: sala comporta a SOMA de alunos de todas as turmas?
+                if not validar_capacidade_grupo(grupo, sala):
+                    continue
+
+                # TRAVA 2 — RN_5: sala já está em uso neste slot?
+                if sala_ja_ocupada(grade, sala['sala'], dia, horario):
+                    continue
+
+                # ✅ Todas as regras e travas passaram.
+                # Aloca cada turma do grupo no mesmo professor/sala/slot.
+                for _, turma_row in grupo.iterrows():
+                    grade = alocar_aula(
+                        grade,
+                        turma_row['turma'],
+                        turma_row['disciplina'],
+                        nome_professor,
+                        sala['sala'],
+                        dia,
+                        horario
+                    )
+
+                return grade, True  # Sucesso: interrompe busca para este grupo
 
     return grade, False  # Nenhuma combinação válida encontrada
 
@@ -519,3 +533,283 @@ def exportar_grade(
     caminho_absoluto = os.path.abspath(caminho)
     print(f"✅ Grade exportada com sucesso em '{caminho_absoluto}'.")
     return caminho_absoluto
+
+
+# =============================================================================
+# MÓDULO 6 — PRÉ-VALIDAÇÃO CRUZADA DOS CSVs (Sprint S9 — PRE_01)
+#
+# Verifica inconsistências entre os três arquivos ANTES de rodar o motor.
+# Analogia: é o "check-up médico" dos dados — melhor descobrir o problema
+# antes da cirurgia do que no meio dela.
+#
+# Regras verificadas:
+#   PRE_01-A → Turma do tipo Laboratorio sem sala Laboratorio cadastrada
+#   PRE_01-B → Disciplina em turmas.csv sem professor habilitado
+#   PRE_01-C → Capacidade ou número de alunos zero ou negativo
+#   PRE_01-D → Professor com dia ou horário em branco (NaN)
+# =============================================================================
+
+def validar_consistencia_dados(data: dict) -> list[str]:
+    """
+    PRE_01 — Valida a consistência cruzada entre os três DataFrames de entrada.
+
+    Detecta problemas estruturais que impediriam alocações válidas antes mesmo
+    de o motor Greedy ser executado. Não lança exceções — apenas acumula e
+    retorna avisos para exibição na interface.
+
+    Parâmetro:
+        data → dicionário com chaves 'professores', 'turmas', 'salas',
+               no mesmo formato retornado por carregar_dados().
+
+    Retorna:
+        list[str] → lista de strings de aviso (vazia = dados consistentes).
+
+    Regras verificadas:
+        PRE_01-A: Turma do tipo 'Laboratorio' sem nenhuma sala 'Laboratorio'.
+        PRE_01-B: Disciplina em turmas.csv sem professor habilitado.
+        PRE_01-C: Coluna 'capacidade' (salas) ou 'alunos' (turmas) com valor
+                  zero ou negativo — indica dado corrompido ou ausente.
+        PRE_01-D: Professor com 'dia' ou 'horario' em branco (NaN).
+    """
+    avisos: list[str] = []
+
+    professores = data.get('professores', pd.DataFrame())
+    turmas      = data.get('turmas',      pd.DataFrame())
+    salas       = data.get('salas',       pd.DataFrame())
+
+    # ── PRE_01-A: turma de laboratório sem sala de laboratório ────────────
+    # Só faz sentido verificar se ambos os DataFrames existem e não estão
+    # vazios. Se não há nenhuma sala do tipo 'Laboratorio', qualquer turma
+    # do tipo 'Laboratorio' nunca será alocada — aviso crítico.
+    if not turmas.empty and not salas.empty:
+        tem_sala_lab = (
+            salas['tipo'].str.lower().str.strip() == 'laboratorio'
+        ).any()
+
+        turmas_lab = turmas[
+            turmas['tipo'].str.lower().str.strip() == 'laboratorio'
+        ]
+
+        if not turmas_lab.empty and not tem_sala_lab:
+            nomes = ', '.join(turmas_lab['turma'].tolist())
+            avisos.append(
+                f"[PRE_01-A] Turma(s) do tipo Laboratorio ({nomes}) sem "
+                "nenhuma sala de Laboratorio cadastrada em salas.csv. "
+                "Essas turmas não serão alocadas."
+            )
+
+    # ── PRE_01-B: disciplina sem professor habilitado ─────────────────────
+    # Para cada disciplina distinta nas turmas, verifica se existe ao menos
+    # uma linha em professores.csv com a mesma disciplina.
+    # Se não existir, a disciplina nunca poderá ser alocada.
+    if not turmas.empty and not professores.empty:
+        disciplinas_turmas = set(turmas['disciplina'].dropna().unique())
+        disciplinas_prof   = set(professores['disciplina'].dropna().unique())
+
+        sem_professor = disciplinas_turmas - disciplinas_prof
+        for disciplina in sorted(sem_professor):
+            avisos.append(
+                f"[PRE_01-B] Disciplina '{disciplina}' presente em turmas.csv "
+                "não possui nenhum professor habilitado em professores.csv."
+            )
+
+    # ── PRE_01-C: capacidade ou número de alunos inválido (zero/negativo) ─
+    # Valores zero ou negativos são dados corrompidos: uma sala com capacidade
+    # 0 nunca aceita ninguém; uma turma com 0 alunos não faz sentido.
+    if not salas.empty and 'capacidade' in salas.columns:
+        salas_invalidas = salas[
+            pd.to_numeric(salas['capacidade'], errors='coerce').fillna(0) <= 0
+        ]
+        if not salas_invalidas.empty:
+            nomes = ', '.join(salas_invalidas['sala'].astype(str).tolist())
+            avisos.append(
+                f"[PRE_01-C] Sala(s) com capacidade zero ou negativa: {nomes}. "
+                "Verifique os valores na coluna 'capacidade' de salas.csv."
+            )
+
+    if not turmas.empty and 'alunos' in turmas.columns:
+        turmas_invalidas = turmas[
+            pd.to_numeric(turmas['alunos'], errors='coerce').fillna(0) <= 0
+        ]
+        if not turmas_invalidas.empty:
+            nomes = ', '.join(turmas_invalidas['turma'].astype(str).tolist())
+            avisos.append(
+                f"[PRE_01-C] Turma(s) com número de alunos zero ou negativo: "
+                f"{nomes}. Verifique a coluna 'alunos' de turmas.csv."
+            )
+
+    # ── PRE_01-D: professor com dia ou horário em branco ──────────────────
+    # Linha com NaN em 'dia' ou 'horario' nunca passa na validar_disponibilidade,
+    # então o slot é desperdiçado silenciosamente — melhor avisar antes.
+    if not professores.empty:
+        dia_nan     = professores['dia'].isna()
+        horario_nan = professores['horario'].isna()
+        profs_invalidos = professores[dia_nan | horario_nan]
+
+        if not profs_invalidos.empty:
+            nomes = ', '.join(profs_invalidos['nome'].astype(str).unique())
+            avisos.append(
+                f"[PRE_01-D] Professor(es) com dia ou horário em branco: "
+                f"{nomes}. Esses slots de disponibilidade serão ignorados "
+                "pelo motor de alocação."
+            )
+
+    return avisos
+
+
+# =============================================================================
+# MÓDULO 7 — RELATÓRIO DE FALHAS (Sprint S9 — REL_01)
+#
+# Gera um CSV separado com o motivo provável de cada turma não alocada.
+# Analogia: é o "laudo do diagnóstico" — não basta saber que o paciente
+# não passou; o médico precisa saber POR QUÊ para prescrever a correção.
+# =============================================================================
+
+def _normalizar_tipo_sala(tipo: str) -> str:
+    """
+    REL_01 — Normaliza o tipo de sala para comparação consistente.
+
+    O CSV de salas aceita 'Sala' e 'Teorica' como sinônimos para
+    ambientes teóricos (conforme validar_tipo_sala usa .lower()).
+    Internamente o motor compara turma['tipo'].lower() == sala['tipo'].lower(),
+    então 'Teorica' casa com 'Teorica', mas 'Sala' não casa com 'Teorica'.
+
+    Para o diagnóstico de falha, qualquer tipo que NÃO seja 'laboratorio'
+    é tratado como teórico, espelhando a mesma lógica do motor.
+    """
+    normalizado = tipo.strip().lower()
+    if normalizado == 'laboratorio':
+        return 'laboratorio'
+    # 'sala', 'teorica' e qualquer outro valor → teórico
+    return normalizado
+
+
+def _inferir_motivo_falha(
+    turma_row: pd.Series,
+    professores: pd.DataFrame,
+    salas: pd.DataFrame
+) -> str:
+    """
+    REL_01 — Infere o motivo mais provável pelo qual uma turma não foi alocada.
+
+    Hierarquia de diagnóstico (da causa mais restritiva à menos):
+        1. Nenhum professor habilitado para a disciplina.
+        2. Nenhuma sala do tipo correto disponível.
+        3. Nenhuma sala do tipo correto com capacidade suficiente.
+        4. Conflito de horário: recursos existem mas todos os slots estavam
+           ocupados por alocações de outras turmas.
+
+    O diagnóstico é estático — analisa os CSVs de entrada, não simula a
+    grade em tempo real. Por isso o campo chama-se 'motivo_provavel'.
+
+    Retorna string descritiva do motivo.
+    """
+    disciplina = turma_row['disciplina']
+    tipo_turma = _normalizar_tipo_sala(str(turma_row.get('tipo', '')))
+    alunos     = turma_row.get('alunos', 0)
+
+    # Diagnóstico 1: existe professor habilitado para essa disciplina?
+    prof_habilitados = professores[
+        professores['disciplina'] == disciplina
+    ]
+    if prof_habilitados.empty:
+        return "Nenhum professor habilitado para esta disciplina"
+
+    # Diagnóstico 2: existe sala do tipo correto?
+    # Compara usando a mesma normalização do motor (lower + strip).
+    salas_tipo = salas[
+        salas['tipo'].str.lower().str.strip() == tipo_turma
+    ]
+    if salas_tipo.empty:
+        tipo_legivel = tipo_turma.capitalize()
+        return f"Nenhuma sala do tipo {tipo_legivel} cadastrada"
+
+    # Diagnóstico 3: existe sala do tipo correto com capacidade suficiente?
+    salas_com_capacidade = salas_tipo[
+        pd.to_numeric(salas_tipo['capacidade'], errors='coerce').fillna(0)
+        >= alunos
+    ]
+    if salas_com_capacidade.empty:
+        tipo_legivel = tipo_turma.capitalize()
+        return (
+            f"Nenhuma sala do tipo {tipo_legivel} com capacidade "
+            f"suficiente para {int(alunos)} aluno(s)"
+        )
+
+    # Diagnóstico 4: todos os recursos existem mas algo impediu a alocação
+    # (provavelmente conflito de horário com outras turmas já alocadas).
+    return (
+        "Conflito de horário: todos os slots do professor ou da sala "
+        "estavam ocupados por outras alocações"
+    )
+
+
+def gerar_relatorio_falhas(
+    turmas_df: pd.DataFrame,
+    grade: pd.DataFrame,
+    professores: pd.DataFrame = None,
+    salas: pd.DataFrame = None,
+    caminho: str = 'csv/falhas_alocacao.csv',
+) -> pd.DataFrame:
+    """
+    REL_01 — Gera relatório das turmas que não puderam ser alocadas.
+
+    Cruza o DataFrame original de turmas com a grade gerada e, para cada
+    turma ausente, infere o motivo provável da falha com base nos CSVs.
+
+    O relatório só é salvo em disco se houver ao menos uma falha (evita
+    criar arquivo vazio enganoso). Usa UTF-8 e index=False, igual ao
+    exportar_grade().
+
+    Parâmetros:
+        turmas_df    → DataFrame original de turmas.csv
+        grade        → DataFrame da grade gerada por gerar_grade()
+        professores  → DataFrame de professores.csv (opcional; usado para
+                       inferir motivo mais preciso)
+        salas        → DataFrame de salas.csv (opcional; idem)
+        caminho      → destino do CSV de saída
+                       (padrão: 'csv/falhas_alocacao.csv')
+
+    Retorna:
+        pd.DataFrame com colunas:
+            turma | disciplina | alunos | tipo | motivo_provavel
+        DataFrame vazio se todas as turmas foram alocadas.
+    """
+    # Identifica turmas ausentes na grade
+    alocadas = set(grade['turma'].unique()) if not grade.empty else set()
+    nao_alocadas = turmas_df[
+        ~turmas_df['turma'].isin(alocadas)
+    ].reset_index(drop=True)
+
+    if nao_alocadas.empty:
+        return pd.DataFrame(
+            columns=['turma', 'disciplina', 'alunos', 'tipo', 'motivo_provavel']
+        )
+
+    # DataFrames vazios como fallback quando não fornecidos
+    df_prof  = professores if professores is not None else pd.DataFrame(
+        columns=['nome', 'disciplina', 'dia', 'horario']
+    )
+    df_salas = salas if salas is not None else pd.DataFrame(
+        columns=['sala', 'capacidade', 'tipo']
+    )
+
+    # Infere o motivo de cada turma não alocada
+    motivos = [
+        _inferir_motivo_falha(row, df_prof, df_salas)
+        for _, row in nao_alocadas.iterrows()
+    ]
+
+    relatorio = nao_alocadas[['turma', 'disciplina', 'alunos', 'tipo']].copy()
+    relatorio['motivo_provavel'] = motivos
+
+    # Salva em disco somente se houver falhas
+    diretorio = os.path.dirname(caminho)
+    if diretorio:
+        os.makedirs(diretorio, exist_ok=True)
+
+    relatorio.to_csv(caminho, index=False, encoding='utf-8')
+    caminho_absoluto = os.path.abspath(caminho)
+    print(f"📋 Relatório de falhas exportado em '{caminho_absoluto}'.")
+
+    return relatorio

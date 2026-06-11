@@ -1,6 +1,6 @@
 """
 INT_01 + INT_02 — Dashboard de Upload e Visualizador Dinâmico da Grade
-Sprint S8 | Faculdade Impacta — Engenharia de Software | SI NOITE 2A
+Sprint S8-S9 | Faculdade Impacta — Engenharia de Software | SI NOITE 2A
 
 Responsabilidade deste arquivo:
     Apenas interface visual (upload, validação de entrada, exibição de resultados).
@@ -17,7 +17,12 @@ import contextlib
 import pandas as pd
 import streamlit as st
 
-from projeto import gerar_grade, exportar_grade
+from projeto import (
+    gerar_grade,
+    exportar_grade,
+    validar_consistencia_dados,
+    gerar_relatorio_falhas,
+)
 
 # =============================================================================
 # CONSTANTES
@@ -102,6 +107,23 @@ def ler_csv_upload(arquivo, chave: str) -> tuple:
                 "Certifique-se de que são números inteiros."
             )
 
+    if chave == 'professores':
+        # Trava de integridade: a mesma matrícula não pode estar associada
+        # a nomes diferentes. A matrícula repetindo em várias linhas é normal
+        # (um professor com múltiplos horários); o que é inválido é a mesma
+        # matrícula aparecer com dois nomes distintos — indica dado corrompido.
+        nomes_por_matricula = (
+            df.groupby('matricula')['nome']
+            .nunique()
+        )
+        matriculas_ambiguas = nomes_por_matricula[nomes_por_matricula > 1].index.tolist()
+        if matriculas_ambiguas:
+            lista = ', '.join(str(m) for m in matriculas_ambiguas)
+            return None, (
+                f"Matrícula(s) com mais de um nome cadastrado: **{lista}**. "
+                "Cada matrícula deve pertencer a um único professor."
+            )
+
     return df, None
 
 
@@ -132,6 +154,16 @@ def capturar_avisos_grade(data: dict) -> tuple:
     with contextlib.redirect_stdout(buf):
         grade = gerar_grade(data)
     return grade, buf.getvalue().strip()
+
+
+def converter_relatorio_para_bytes(relatorio: pd.DataFrame) -> bytes:
+    """
+    REL_01 — Converte o DataFrame do relatório de falhas para bytes CSV,
+    sem gravar em disco (para o botão de download do navegador).
+    """
+    buf = io.StringIO()
+    relatorio.to_csv(buf, index=False, encoding='utf-8')
+    return buf.getvalue().encode('utf-8')
 
 
 # =============================================================================
@@ -513,6 +545,25 @@ if not todos_validos:
     faltando = sum(u is None for u in [upload_prof, upload_turmas, upload_salas])
     st.info(f"⏳ Aguardando **{faltando}** arquivo(s) para liberar a geração.")
 
+# ── PRE_01: Validação cruzada dos CSVs antes da geração ──────────────────────
+# Exibe avisos de inconsistência encontrados nos dados sem bloquear a execução.
+# O coordenador pode corrigir os CSVs ou optar por prosseguir mesmo assim.
+if todos_validos:
+    avisos_pre = validar_consistencia_dados(dados_validos)
+    if avisos_pre:
+        with st.expander(
+            f"⚠️ {len(avisos_pre)} aviso(s) de consistência nos dados "
+            "— verifique antes de gerar",
+            expanded=True,
+        ):
+            for aviso in avisos_pre:
+                st.warning(aviso)
+            st.caption(
+                "💡 Esses avisos não impedem a geração, mas indicam que "
+                "algumas turmas podem não ser alocadas. Corrija os CSVs "
+                "para melhores resultados."
+            )
+
 btn_gerar = st.button(
     "🚀 Gerar Grade de Horários",
     disabled=not todos_validos,
@@ -529,9 +580,23 @@ if btn_gerar and todos_validos:
     # salva com UTF-8 sem índice e retorna o caminho absoluto para exibição.
     caminho_salvo = exportar_grade(grade, caminho_exportacao)
 
-    st.session_state['grade']         = grade
-    st.session_state['avisos']        = avisos
-    st.session_state['caminho_salvo'] = caminho_salvo
+    # ── REL_01: Gera relatório de falhas e salva em disco ────────────────
+    # Só grava o CSV se houver turmas não alocadas (falha silenciosa = ok).
+    caminho_falhas = os.path.join(
+        os.path.dirname(caminho_exportacao), 'falhas_alocacao.csv'
+    )
+    relatorio_falhas = gerar_relatorio_falhas(
+        turmas_df=dados_validos.get('turmas', pd.DataFrame()),
+        grade=grade,
+        professores=dados_validos.get('professores'),
+        salas=dados_validos.get('salas'),
+        caminho=caminho_falhas,
+    )
+
+    st.session_state['grade']            = grade
+    st.session_state['avisos']           = avisos
+    st.session_state['caminho_salvo']    = caminho_salvo
+    st.session_state['relatorio_falhas'] = relatorio_falhas
 
 
 # =============================================================================
@@ -585,6 +650,28 @@ if 'grade' in st.session_state:
                 "Revise os CSVs: certifique-se de que há professor habilitado, "
                 "sala do tipo correto e horário disponível para essas turmas."
             )
+
+            # ── REL_01: Relatório de falhas com motivo_provavel ───────────
+            # Exibe tabela com a coluna 'motivo_provavel' para cada turma
+            # não alocada e oferece botão de download do CSV separado.
+            relatorio_falhas = st.session_state.get('relatorio_falhas', pd.DataFrame())
+            if not relatorio_falhas.empty:
+                st.markdown("**📋 Diagnóstico detalhado (motivo provável):**")
+                st.dataframe(
+                    relatorio_falhas,
+                    use_container_width=True,
+                    height=min(250, 60 + len(relatorio_falhas) * 38),
+                )
+                st.download_button(
+                    label="⬇️ Baixar relatório de falhas (falhas_alocacao.csv)",
+                    data=converter_relatorio_para_bytes(relatorio_falhas),
+                    file_name="falhas_alocacao.csv",
+                    mime="text/csv",
+                    help=(
+                        "Baixa o CSV com turmas não alocadas e o motivo "
+                        "provável de cada falha."
+                    ),
+                )
 
     # ── Aviso genérico de grade vazia ─────────────────────────────────────
     if grade.empty:
